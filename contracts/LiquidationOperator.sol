@@ -1,7 +1,7 @@
 //SPDX-License-Identifier: Unlicense
-pragma solidity ^0.8.7;
+pragma solidity >= 0.8.7;
 
-import "hardhat/console.sol";
+
 
 // ----------------------INTERFACE------------------------------
 
@@ -136,7 +136,15 @@ contract LiquidationOperator is IUniswapV2Callee {
     uint8 public constant health_factor_decimals = 18;
 
     // TODO: define constants used in the contract including ERC-20 tokens, Uniswap Pairs, Aave lending pools, etc. */
-    //    *** Your code here ***
+    address USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+    address WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address target_address = 0x59CE4a2AC5bC3f5F225439B2993b86B42f6d3e9F;
+    address aaveLendingPool = 0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9;
+    //address IUniswapV2Factory = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
+    address ethUsdtPairUni = 0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852;
+    address wbtcEthPairUni = 0xBb2b8038a1640196FbE3e38816F3e67Cba72D940;
+    address me = address(this);
     // END TODO
 
     // some helper function, it is totally fine if you can finish the lab without using these function
@@ -184,18 +192,29 @@ contract LiquidationOperator is IUniswapV2Callee {
     }
 
     // TODO: add a `receive` function so that you can withdraw your WETH
-    //   *** Your code here ***
+    receive() external payable {}
     // END TODO
 
     // required by the testing script, entry for your liquidation call
     function operate() external {
         // TODO: implement your liquidation logic
-
         // 0. security checks and initializing variables
         //    *** Your code here ***
+        uint256 totalCollateralETH;
+        uint256 totalDebtETH;
+        uint256 availableBorrowsETH;
+        uint256 currentLiquidationThreshold;
+        uint256 ltv;
+        uint256 healthFactor;
+        uint256 usdtAmount = 2916378221684;
 
         // 1. get the target user account data & make sure it is liquidatable
         //    *** Your code here ***
+        ILendingPool Aave_lending_pool = ILendingPool(aaveLendingPool);
+        (totalCollateralETH, totalDebtETH, availableBorrowsETH, currentLiquidationThreshold, ltv, healthFactor)
+         = Aave_lending_pool.getUserAccountData(target_address);
+        //console.log(healthFactor);
+        require(healthFactor < 10 ** 18, "should be less than 1");
 
         // 2. call flash swap to liquidate the target user
         // based on https://etherscan.io/tx/0xac7df37a43fab1b130318bbb761861b8357650db2e2c6493b73d6da3d9581077
@@ -203,10 +222,17 @@ contract LiquidationOperator is IUniswapV2Callee {
         // we should borrow USDT, liquidate the target user and get the WBTC, then swap WBTC to repay uniswap
         // (please feel free to develop other workflows as long as they liquidate the target user successfully)
         //    *** Your code here ***
-
+        //give eth and borrow usdt (non 0 amount is for the token you want to borrow)
+        IUniswapV2Pair ethUsdtPair = IUniswapV2Pair(ethUsdtPairUni);
+        ethUsdtPair.swap(0, usdtAmount, me, bytes('flashLoan'));
         // 3. Convert the profit into ETH and send back to sender
         //    *** Your code here ***
+        uint256 wethBalance = IERC20(WETH).balanceOf(me);
+        IWETH(WETH).withdraw(wethBalance);
+        //msg.sender.call{value: wethBalance}("");//suggestion from victor huangs guide
 
+        //send back ETH (profit) to caller
+        payable(msg.sender).transfer(wethBalance);
         // END TODO
     }
 
@@ -221,15 +247,44 @@ contract LiquidationOperator is IUniswapV2Callee {
 
         // 2.0. security checks and initializing variables
         //    *** Your code here ***
+        // get the addresses of the two tokens from the uniswap liquidity pool 
+
 
         // 2.1 liquidate the target user
         //    *** Your code here ***
-
+        ILendingPool lending_pool = ILendingPool(aaveLendingPool);
+        IERC20(USDT).approve(aaveLendingPool, amount1);
+        //function liquidationCall(collateralAsset, debtAsset, user, debtToCover, receiveAToken)
+        lending_pool.liquidationCall(WBTC, USDT, target_address, amount1, false);
+        
         // 2.2 swap WBTC for other things or repay directly
         //    *** Your code here ***
+        //get my wbtc balance
+        uint256 wbtc_amount = IERC20(WBTC).balanceOf(me);
+        IERC20(WBTC).approve(wbtcEthPairUni, wbtc_amount);
+        IERC20(WBTC).transfer(wbtcEthPairUni, wbtc_amount);
 
-        // 2.3 repay
+        uint256 ethOut;
+        uint112 reserveWbtc;
+        uint112 reserveEth;
+        //change wbtc val to eth
+        IUniswapV2Pair wbtEthPair = IUniswapV2Pair(wbtcEthPairUni);
+        (reserveWbtc, reserveEth, ) = wbtEthPair.getReserves();
+        ethOut = getAmountOut(wbtc_amount, reserveWbtc, reserveEth);
+        IUniswapV2Pair(wbtcEthPairUni).swap(0, ethOut, me, bytes(''));
+
+         // 2.3 repay
         //    *** Your code here ***
+        uint256 repayAmount;
+        uint112 reserve0;
+        uint112 reserve1;
+
+        IUniswapV2Pair ethUsdtPair = IUniswapV2Pair(ethUsdtPairUni);
+        (reserve0, reserve1, ) = ethUsdtPair.getReserves();
+        repayAmount = getAmountIn(amount1, reserve0, reserve1);
+        IERC20(WETH).approve(msg.sender, repayAmount);
+        IERC20(WETH).transfer(msg.sender, repayAmount);
+        
         
         // END TODO
     }
